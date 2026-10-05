@@ -2,263 +2,1248 @@ import json
 import pyotp
 import requests
 import yfinance as yf
+
+from django.conf import settings
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+
 from SmartApi import SmartConnect
+
 from .ai_agents import OmniQuantSpecialist
 
-# --- OMNIQUANT SYSTEM CONFIGURATION ---
-SMART_API_KEY = "r7a07H6a"
-SMART_CLIENT_ID = "H50438594" 
-SMART_PASSWORD = "2004"  
-SMART_TOTP_SECRET = "DIK6P2BZAWOPCWOP226FNTY7AE" 
-# ---------------------------------------
+
+# ---------------------------------------------------------
+# YFINANCE CACHE
+# ---------------------------------------------------------
+
+yf.set_tz_cache_location(
+    str(settings.YFINANCE_CACHE_DIR)
+)
+
+
+# ---------------------------------------------------------
+# OMNI QUANT SYSTEM CONFIGURATION
+# ---------------------------------------------------------
+# KEEP YOUR EXISTING LOCAL VALUES HERE.
+# Do not commit these credentials to GitHub.
+
+SMART_API_KEY = "YOUR_SMART_API_KEY"
+SMART_CLIENT_ID = "YOUR_SMART_CLIENT_ID"
+SMART_PASSWORD = "YOUR_SMART_PASSWORD"
+SMART_TOTP_SECRET = "YOUR_SMART_TOTP_SECRET"
+
+
+# ---------------------------------------------------------
+# YAHOO FINANCE SYMBOL MAPS
+# ---------------------------------------------------------
+
+FOREX_SYMBOLS = {
+    "USDINR": [
+        "USDINR=X",
+        "INR=X",
+    ],
+
+    "EURINR": [
+        "EURINR=X",
+    ],
+
+    "GBPINR": [
+        "GBPINR=X",
+    ],
+
+    "JPYINR": [
+        "JPYINR=X",
+    ],
+
+    "AUDINR": [
+        "AUDINR=X",
+    ],
+
+    "CADINR": [
+        "CADINR=X",
+    ],
+
+    "CHFINR": [
+        "CHFINR=X",
+    ],
+
+    "EURUSD": [
+        "EURUSD=X",
+    ],
+
+    "GBPUSD": [
+        "GBPUSD=X",
+    ],
+
+    "USDJPY": [
+        "JPY=X",
+        "USDJPY=X",
+    ],
+
+    "AUDUSD": [
+        "AUDUSD=X",
+    ],
+}
+
+
+COMMODITY_SYMBOLS = {
+    "GOLD": "GC=F",
+    "SILVER": "SI=F",
+    "CRUDE": "CL=F",
+    "NATGAS": "NG=F",
+    "COPPER": "HG=F",
+    "ALUMINUM": "ALI=F",
+}
+
+
+OPTIONS_SYMBOLS = {
+    "NIFTY": "^NSEI",
+    "BANKNIFTY": "^NSEBANK",
+    "FINNIFTY": "^CNXFIN",
+}
+
+
+BOND_SYMBOLS = {
+    "US10Y": "^TNX",
+    "US02Y": "^IRX",
+    "IN10Y": "^IN10YT=RR",
+}
+
+
+# ---------------------------------------------------------
+# SYMBOL HELPERS
+# ---------------------------------------------------------
+
+def get_yahoo_candidates(symbol, segment):
+    """
+    Return ordered Yahoo Finance candidates for an asset.
+
+    The first valid symbol is preferred.
+    """
+
+    symbol = (
+        str(symbol)
+        .upper()
+        .strip()
+    )
+
+    segment = (
+        str(segment)
+        .upper()
+        .strip()
+    )
+
+    # -----------------------------
+    # STOCKS
+    # -----------------------------
+
+    if segment == "STOCKS":
+
+        if symbol in [
+            "AAPL",
+            "TSLA",
+            "MSFT",
+        ]:
+
+            return [
+                symbol
+            ]
+
+        return [
+            f"{symbol}.NS",
+            symbol,
+            f"{symbol}.BO",
+        ]
+
+    # -----------------------------
+    # FOREX
+    # -----------------------------
+
+    if segment == "FOREX":
+
+        if symbol in FOREX_SYMBOLS:
+
+            return FOREX_SYMBOLS[
+                symbol
+            ]
+
+        # Already a Yahoo-style pair
+        if symbol.endswith("=X"):
+
+            return [
+                symbol
+            ]
+
+        # Generic pair such as EURUSD
+        return [
+            f"{symbol}=X",
+            symbol,
+        ]
+
+    # -----------------------------
+    # CRYPTO
+    # -----------------------------
+
+    if segment == "CRYPTO":
+
+        return [
+            f"{symbol}-USD",
+            f"{symbol}-INR",
+            symbol,
+        ]
+
+    # -----------------------------
+    # COMMODITIES
+    # -----------------------------
+
+    if segment == "COMMODITY":
+
+        return [
+            COMMODITY_SYMBOLS.get(
+                symbol,
+                f"{symbol}=F"
+            )
+        ]
+
+    # -----------------------------
+    # OPTIONS
+    # -----------------------------
+
+    if segment == "OPTIONS":
+
+        return [
+            OPTIONS_SYMBOLS.get(
+                symbol,
+                symbol
+            )
+        ]
+
+    # -----------------------------
+    # BONDS
+    # -----------------------------
+
+    if segment == "BONDS":
+
+        return [
+            BOND_SYMBOLS.get(
+                symbol,
+                symbol
+            )
+        ]
+
+    # -----------------------------
+    # DEFAULT
+    # -----------------------------
+
+    return [
+        symbol
+    ]
+
+
+def fetch_yahoo_history(
+    symbol,
+    segment,
+    period="1mo",
+    interval="1d",
+):
+    """
+    Try Yahoo symbols in order and return the first
+    non-empty dataframe.
+    """
+
+    candidates = get_yahoo_candidates(
+        symbol,
+        segment
+    )
+
+    for yahoo_symbol in candidates:
+
+        try:
+
+            print(
+                f"[YFINANCE] Trying "
+                f"{symbol} -> {yahoo_symbol}"
+            )
+
+            ticker = yf.Ticker(
+                yahoo_symbol
+            )
+
+            df = ticker.history(
+                period=period,
+                interval=interval
+            )
+
+            if df is not None and not df.empty:
+
+                print(
+                    f"[YFINANCE] SUCCESS "
+                    f"{symbol} -> {yahoo_symbol}"
+                )
+
+                return (
+                    yahoo_symbol,
+                    df
+                )
+
+            print(
+                f"[YFINANCE] No data "
+                f"for {yahoo_symbol}"
+            )
+
+        except Exception as error:
+
+            print(
+                f"[YFINANCE] Failed "
+                f"{yahoo_symbol}: {error}"
+            )
+
+    return None, None
+
+
+def build_price_data(df):
+    """
+    Convert Yahoo dataframe into the format
+    expected by OmniQuantSpecialist.
+    """
+
+    price_data = []
+
+    if df is None or df.empty:
+        return price_data
+
+    for _, row in df.iterrows():
+
+        try:
+
+            close = float(
+                row["Close"]
+            )
+
+            high = float(
+                row["High"]
+            )
+
+            low = float(
+                row["Low"]
+            )
+
+            if (
+                close <= 0
+                or high <= 0
+                or low <= 0
+            ):
+                continue
+
+            price_data.append(
+                {
+                    "close": round(
+                        close,
+                        4
+                    ),
+
+                    "high": round(
+                        high,
+                        4
+                    ),
+
+                    "low": round(
+                        low,
+                        4
+                    ),
+                }
+            )
+
+        except (
+            TypeError,
+            ValueError,
+            KeyError
+        ):
+            continue
+
+    return price_data
+
+
+# ---------------------------------------------------------
+# LANDING PAGE
+# ---------------------------------------------------------
 
 def landing(request):
-    """Renders the Biometric Vault entrance."""
-    return render(request, 'core/vault.html')
+    """
+    Renders the Biometric Vault entrance.
+    """
+
+    return render(
+        request,
+        "core/vault.html"
+    )
+
+
+# ---------------------------------------------------------
+# DASHBOARD
+# ---------------------------------------------------------
 
 def dashboard(request):
-    """Renders the main Glass-JARVIS Dashboard."""
-    return render(request, 'core/dashboard.html')
+    """
+    Renders the main Omni Quant dashboard.
+    """
 
+    return render(
+        request,
+        "core/dashboard.html"
+    )
+
+
+# ---------------------------------------------------------
+# AI INSIGHT
+# ---------------------------------------------------------
 
 def get_ai_insight(request):
-    """
-    Bulletproof API Route: Feeds data to the AI without crashing.
-    """
-    symbol = request.GET.get('symbol', 'RELIANCE').upper().strip()
-    segment = request.GET.get('segment', 'STOCKS').upper()
-    ear = float(request.GET.get('ear', 0.28))
+
+    symbol = (
+        request.GET.get(
+            "symbol",
+            "RELIANCE"
+        )
+        .upper()
+        .strip()
+    )
+
+    segment = (
+        request.GET.get(
+            "segment",
+            "STOCKS"
+        )
+        .upper()
+        .strip()
+    )
+
+    # Kept only for backward compatibility.
+    # The current biometric system no longer uses
+    # EAR/blinking to decide human presence.
+    try:
+
+        ear = float(
+            request.GET.get(
+                "ear",
+                0.28
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        ear = 0.28
 
     try:
-        # 1. SMART PROXY ROUTING FOR YFINANCE
-        # 1. SMART PROXY ROUTING FOR YFINANCE
-        if segment == 'STOCKS':
-            ticker_str = f"{symbol}.NS" if symbol not in ['AAPL', 'TSLA', 'MSFT'] else symbol
-        elif segment == 'COMMODITY':
-            ticker_str = {"GOLD": "GC=F", "SILVER": "SI=F", "CRUDE": "CL=F"}.get(symbol, f"{symbol}=F")
-        elif segment == 'OPTIONS':
-            ticker_str = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "FINNIFTY": "^CNXFIN"}.get(symbol, symbol)
-        elif segment == 'CRYPTO':
-            ticker_str = f"{symbol}-USD"
-        elif segment == 'BONDS':   # <-- ADD THIS BLOCK
-            ticker_str = {"US10Y": "^TNX", "US02Y": "^IRX", "IN10Y": "^IN10YT=RR"}.get(symbol, symbol)
-        else:
-            ticker_str = f"{symbol}INR=X"
 
-        # 2. FETCH DATA
-        ticker = yf.Ticker(ticker_str)
-        df = ticker.history(period="1mo", interval="1d")
-        
-        price_data = []
-        if not df.empty:
-            for _, row in df.iterrows():
-                price_data.append({
-                    "close": round(row['Close'], 2), 
-                    "high": round(row['High'], 2), 
-                    "low": round(row['Low'], 2)
-                })
-        else:
-            # Fallback so the AI doesn't crash if data is missing
-            price_data = [{"close": 0, "high": 0, "low": 0}, {"close": 0, "high": 0, "low": 0}]
+        # -------------------------------------------------
+        # FETCH REAL MARKET DATA
+        # -------------------------------------------------
 
-        # 3. GENERATE INTELLIGENCE
-        response = OmniQuantSpecialist.generate_intelligence(
-            segment=segment, 
-            symbol=symbol, 
-            price_data=price_data, 
-            news_data=[], # Passing empty to speed up AI inference, as news is loaded separately in HUD
-            ear_score=ear
+        yahoo_symbol, df = (
+            fetch_yahoo_history(
+                symbol=symbol,
+                segment=segment,
+                period="1mo",
+                interval="1d",
+            )
         )
-        return JsonResponse(response)
 
-    except Exception as e:
-        return JsonResponse({"status": "ERROR", "insight": f"> ERROR PROCESSING DATA: {str(e)}"})
+        # -------------------------------------------------
+        # NO DATA
+        # -------------------------------------------------
 
+        if (
+            yahoo_symbol is None
+            or df is None
+            or df.empty
+        ):
+
+            return JsonResponse(
+                {
+                    "status":
+                        "NO_DATA",
+
+                    "insight":
+                        (
+                            f"> NO MARKET DATA "
+                            f"AVAILABLE FOR {symbol}."
+                        )
+                }
+            )
+
+        # -------------------------------------------------
+        # BUILD PRICE DATA
+        # -------------------------------------------------
+
+        price_data = (
+            build_price_data(df)
+        )
+
+        if len(price_data) < 2:
+
+            return JsonResponse(
+                {
+                    "status":
+                        "NO_DATA",
+
+                    "insight":
+                        (
+                            f"> INSUFFICIENT VALID "
+                            f"MARKET DATA FOR {symbol}."
+                        )
+                }
+            )
+
+        # -------------------------------------------------
+        # STARTING PRICE VALIDATION
+        # -------------------------------------------------
+
+        starting_price = float(
+            price_data[0]["close"]
+        )
+
+        current_price = float(
+            price_data[-1]["close"]
+        )
+
+        if (
+            starting_price <= 0
+            or current_price <= 0
+        ):
+
+            return JsonResponse(
+                {
+                    "status":
+                        "NO_DATA",
+
+                    "insight":
+                        (
+                            f"> INVALID MARKET DATA "
+                            f"RECEIVED FOR {symbol}."
+                        )
+                }
+            )
+
+        # -------------------------------------------------
+        # GENERATE AI INTELLIGENCE
+        # -------------------------------------------------
+
+        response = (
+            OmniQuantSpecialist
+            .generate_intelligence(
+                segment=segment,
+
+                symbol=symbol,
+
+                price_data=price_data,
+
+                news_data=[],
+
+                ear_score=ear,
+            )
+        )
+
+        return JsonResponse(
+            response
+        )
+
+    except Exception as error:
+
+        print(
+            f"[AI INSIGHT ERROR] "
+            f"{symbol}/{segment}: "
+            f"{error}"
+        )
+
+        return JsonResponse(
+            {
+                "status":
+                    "ERROR",
+
+                "insight":
+                    (
+                        "> ERROR PROCESSING DATA: "
+                        f"{str(error)}"
+                    )
+            }
+        )
+
+
+# ---------------------------------------------------------
+# MARKET NEWS
+# ---------------------------------------------------------
 
 def get_market_news(request):
     """
-    High-Availability News Fetcher with API Key Rotation & yfinance Fallback.
+    High-availability news fetcher with API-key
+    rotation and Yahoo Finance fallback.
     """
-    symbol = request.GET.get('symbol', 'RELIANCE').upper().strip()
-    clean_symbol = symbol.split('.')[0] # Remove .NS for API compatibility
 
-    # 1. API KEY ROTATION VAULT
+    symbol = (
+        request.GET.get(
+            "symbol",
+            "RELIANCE"
+        )
+        .upper()
+        .strip()
+    )
+
+    clean_symbol = (
+        symbol.split(".")[0]
+    )
+
+    # -----------------------------------------------------
+    # API KEY ROTATION
+    # -----------------------------------------------------
+    # Keep your existing MarketAux keys locally.
+    # Prefer moving them into environment variables.
+
     API_KEYS = [
-        "62y0imCj5G1e0pTXbevxMPd7MEI6V6kBNNiFN5wE", # Primary Key (from user prompt)
-        "2UiPVeqpoHRI7h0gs2caA5b2OaMRV4ajI5iAUEew",               # Fallback 1
-        "FGQ4INmP4ixQSj6PxD9uk6XmapRLjaOGeVXXje1W",                       # Fallback 2
-        "YGwPgSerbDqVe1NsW5bCWn9gIiX9OYrmpO4RYdlt"                       # Fallback 3
+        "YOUR_MARKETAUX_PRIMARY_KEY",
+        "YOUR_MARKETAUX_FALLBACK_KEY_1",
+        "YOUR_MARKETAUX_FALLBACK_KEY_2",
+        "YOUR_MARKETAUX_FALLBACK_KEY_3",
     ]
 
     formatted_news = []
 
-    # 2. ATTEMPT PRIMARY API WITH FAILOVER
+    # -----------------------------------------------------
+    # PRIMARY NEWS API
+    # -----------------------------------------------------
+
     for key in API_KEYS:
-        if key.startswith("YOUR_"): 
-            continue # Skip unfilled placeholder keys
 
-        try:
-            url = f"https://api.marketaux.com/v1/news/all?symbols={clean_symbol}&filter_entities=true&language=en&api_token={key}"
-            response = requests.get(url, timeout=5)
-
-            if response.status_code == 200:
-                data = response.json()
-                if "data" in data and len(data["data"]) > 0:
-                    for item in data["data"][:4]:
-                        formatted_news.append({
-                            "title": item.get("title", "Market Update"),
-                            "url": item.get("url", "#"),
-                            "source": item.get("source", "MarketAux"),
-                            "sentiment": item.get("entities", [{}])[0].get("sentiment_score", 0) if item.get("entities") else 0
-                        })
-                    break # SUCCESS: Break the loop
-                
-            elif response.status_code == 429:
-                print(f"[SYSTEM] NEWS API Rate Limit hit on key ending in ...{key[-4:]}. Rotating...")
-                continue # Try the next key
-            else:
-                continue
-
-        except requests.exceptions.RequestException:
+        if (
+            not key
+            or key.startswith("YOUR_")
+        ):
             continue
 
-    # 3. THE ULTIMATE FALLBACK (If all API keys are exhausted)
-    if not formatted_news:
-        print(f"[SYSTEM] Engaging yfinance fallback for {symbol}.")
         try:
-            yf_symbol = symbol
-            if symbol in ["GOLD", "SILVER", "CRUDE"]:
-                yf_symbol = {"GOLD": "GC=F", "SILVER": "SI=F", "CRUDE": "CL=F"}.get(symbol)
-            elif symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"]:
-                yf_symbol = {"NIFTY": "^NSEI", "BANKNIFTY": "^NSEBANK", "FINNIFTY": "^CNXFIN"}.get(symbol)
-            elif symbol in ["US10Y", "US02Y", "IN10Y"]:  # <-- ADD THIS BLOCK
-                yf_symbol = {"US10Y": "^TNX", "US02Y": "^IRX", "IN10Y": "^IN10YT=RR"}.get(symbol)
-            elif symbol not in ['AAPL', 'TSLA', 'MSFT'] and not symbol.endswith('.NS'):
-                yf_symbol = f"{symbol}.NS"
 
-            ticker = yf.Ticker(yf_symbol)
-            raw_news = ticker.news
-            
-            if raw_news:
-                for item in raw_news[:4]:
-                    formatted_news.append({
-                        "title": item.get("title", "Market Update"),
-                        "url": item.get("link", "#"),
-                        "source": item.get("publisher", "Yahoo Finance"),
-                        "sentiment": 1 
-                    })
-        except Exception as e:
-            print(f"[NEWS UPLINK ERROR]: {e}")
+            url = (
+                "https://api.marketaux.com/v1/news/all"
+                f"?symbols={clean_symbol}"
+                "&filter_entities=true"
+                "&language=en"
+                f"&api_token={key}"
+            )
 
-    # 4. FINAL FAILSAFE
+            response = requests.get(
+                url,
+                timeout=5
+            )
+
+            if response.status_code == 200:
+
+                data = response.json()
+
+                if (
+                    "data" in data
+                    and data["data"]
+                ):
+
+                    for item in data[
+                        "data"
+                    ][:4]:
+
+                        entities = (
+                            item.get(
+                                "entities",
+                                []
+                            )
+                        )
+
+                        sentiment = 0
+
+                        if entities:
+
+                            sentiment = (
+                                entities[0]
+                                .get(
+                                    "sentiment_score",
+                                    0
+                                )
+                            )
+
+                        formatted_news.append(
+                            {
+                                "title":
+                                    item.get(
+                                        "title",
+                                        "Market Update"
+                                    ),
+
+                                "url":
+                                    item.get(
+                                        "url",
+                                        "#"
+                                    ),
+
+                                "source":
+                                    item.get(
+                                        "source",
+                                        "MarketAux"
+                                    ),
+
+                                "sentiment":
+                                    sentiment,
+                            }
+                        )
+
+                    break
+
+            elif response.status_code == 429:
+
+                print(
+                    "[SYSTEM] NEWS API rate limit "
+                    f"on key ending ...{key[-4:]}"
+                )
+
+                continue
+
+            else:
+
+                continue
+
+        except (
+            requests.exceptions.RequestException
+        ):
+
+            continue
+
+    # -----------------------------------------------------
+    # YAHOO NEWS FALLBACK
+    # -----------------------------------------------------
+
     if not formatted_news:
-        formatted_news.append({
-            "title": f"No recent targeted intelligence found for {symbol}. Monitoring broader sector liquidity.",
-            "url": "#",
-            "source": "OMNI_QUANT_SYS",
-            "sentiment": 0
-        })
 
-    return JsonResponse({"news": formatted_news})
+        print(
+            f"[SYSTEM] Engaging yfinance "
+            f"fallback for {symbol}."
+        )
 
+        try:
+
+            # Use the same symbol mapping used by
+            # the market-data engine.
+            fallback_candidates = (
+                get_yahoo_candidates(
+                    symbol,
+                    "FOREX"
+                    if symbol in FOREX_SYMBOLS
+                    else (
+                        "COMMODITY"
+                        if symbol in COMMODITY_SYMBOLS
+                        else (
+                            "BONDS"
+                            if symbol in BOND_SYMBOLS
+                            else (
+                                "OPTIONS"
+                                if symbol in OPTIONS_SYMBOLS
+                                else "STOCKS"
+                            )
+                        )
+                    )
+                )
+            )
+
+            # For normal stocks use .NS fallback.
+            if (
+                symbol not in FOREX_SYMBOLS
+                and symbol not in COMMODITY_SYMBOLS
+                and symbol not in BOND_SYMBOLS
+                and symbol not in OPTIONS_SYMBOLS
+                and symbol not in [
+                    "BTC",
+                    "ETH",
+                    "SOL",
+                    "XRP",
+                ]
+                and not symbol.endswith(".NS")
+                and symbol not in [
+                    "AAPL",
+                    "TSLA",
+                    "MSFT",
+                ]
+            ):
+
+                fallback_candidates = [
+                    f"{symbol}.NS",
+                    symbol,
+                ]
+
+            for yf_symbol in fallback_candidates:
+
+                try:
+
+                    ticker = yf.Ticker(
+                        yf_symbol
+                    )
+
+                    raw_news = (
+                        ticker.news
+                    )
+
+                    if not raw_news:
+                        continue
+
+                    for item in raw_news[:4]:
+
+                        formatted_news.append(
+                            {
+                                "title":
+                                    item.get(
+                                        "title",
+                                        "Market Update"
+                                    ),
+
+                                "url":
+                                    item.get(
+                                        "link",
+                                        "#"
+                                    ),
+
+                                "source":
+                                    item.get(
+                                        "publisher",
+                                        "Yahoo Finance"
+                                    ),
+
+                                "sentiment":
+                                    1,
+                            }
+                        )
+
+                    if formatted_news:
+                        break
+
+                except Exception as error:
+
+                    print(
+                        f"[NEWS FALLBACK] "
+                        f"{yf_symbol}: {error}"
+                    )
+
+        except Exception as error:
+
+            print(
+                f"[NEWS UPLINK ERROR]: {error}"
+            )
+
+    # -----------------------------------------------------
+    # FINAL FAILSAFE
+    # -----------------------------------------------------
+
+    if not formatted_news:
+
+        formatted_news.append(
+            {
+                "title":
+                    (
+                        "No recent targeted "
+                        f"intelligence found for {symbol}. "
+                        "Monitoring broader sector liquidity."
+                    ),
+
+                "url":
+                    "#",
+
+                "source":
+                    "OMNI_QUANT_SYS",
+
+                "sentiment":
+                    0,
+            }
+        )
+
+    return JsonResponse(
+        {
+            "news":
+                formatted_news
+        }
+    )
+
+
+# ---------------------------------------------------------
+# LEGACY BIOMETRIC ENDPOINT
+# ---------------------------------------------------------
+# The actual biometric endpoint is now in sentinel/views.py.
+# This function is retained for compatibility only.
 
 @csrf_exempt
 def analyze_biometrics(request):
-    """Receives EAR uplink from Sentinel.js."""
-    return JsonResponse({"status": "STABLE", "ear": 0.28})
+
+    return JsonResponse(
+        {
+            "status":
+                "STABLE",
+
+            "ear":
+                0.28,
+        }
+    )
+
+
+# ---------------------------------------------------------
+# LEGACY TRADINGVIEW WEBHOOK
+# ---------------------------------------------------------
+# The production TradingView webhook handler is now in
+# sentinel/views.py. Retained here for compatibility.
 
 @csrf_exempt
 def tradingview_webhook(request):
-    """Webhook for TradingView Alerts."""
-    return JsonResponse({"status": "ACKNOWLEDGED"})
 
+    return JsonResponse(
+        {
+            "status":
+                "ACKNOWLEDGED"
+        }
+    )
+
+
+# ---------------------------------------------------------
+# MARKET DATA ENGINE
+# ---------------------------------------------------------
 
 def get_market_data(request):
-    """
-    Dynamic Market Data Engine.
-    NOTE: Currently bypassed by TradingView Widget on the frontend, 
-    but kept active as a backend fallback API.
-    """
-    query = request.GET.get('symbol', '').upper().strip()
-    segment = request.GET.get('segment', 'STOCKS').upper()
-    
+
+    query = (
+        request.GET.get(
+            "symbol",
+            ""
+        )
+        .upper()
+        .strip()
+    )
+
+    segment = (
+        request.GET.get(
+            "segment",
+            "STOCKS"
+        )
+        .upper()
+        .strip()
+    )
+
     if not query:
-        return JsonResponse({"error": "No query provided."}, status=400)
+
+        return JsonResponse(
+            {
+                "error":
+                    "No query provided."
+            },
+            status=400
+        )
 
     chart_data = []
 
     try:
-        # PATH A: OPTIONS (Explicit Broker Path)
-        if segment == 'OPTIONS':
-            smart_api = SmartConnect(api_key=SMART_API_KEY)
-            totp = pyotp.TOTP(SMART_TOTP_SECRET).now()
-            session = smart_api.generateSession(SMART_CLIENT_ID, SMART_PASSWORD, totp)
-            
-            if not session.get('status'):
-                return JsonResponse({"error": f"Broker Auth Failed: {session.get('message')}"}, status=401)
 
-            symbol_token = "3045" 
+        # -------------------------------------------------
+        # OPTIONS
+        # -------------------------------------------------
+
+        if segment == "OPTIONS":
+
+            smart_api = SmartConnect(
+                api_key=SMART_API_KEY
+            )
+
+            totp = pyotp.TOTP(
+                SMART_TOTP_SECRET
+            ).now()
+
+            session = (
+                smart_api.generateSession(
+                    SMART_CLIENT_ID,
+                    SMART_PASSWORD,
+                    totp
+                )
+            )
+
+            if not session.get(
+                "status"
+            ):
+
+                return JsonResponse(
+                    {
+                        "error":
+                            (
+                                "Broker Auth Failed: "
+                                f"{session.get('message')}"
+                            )
+                    },
+                    status=401
+                )
+
+            symbol_token = "3045"
+
             params = {
-                "exchange": "NSE",
-                "symboltoken": symbol_token,
-                "interval": "ONE_DAY",
-                "fromdate": "2026-02-11 09:15",
-                "todate": "2026-03-11 15:30"
-            }
-            
-            response_data = smart_api.getCandleData(params)
-            if response_data.get('status') and response_data.get('data'):
-                for c in response_data['data']:
-                    chart_data.append({
-                        "time": c[0].split('T')[0],
-                        "open": c[1], "high": c[2], "low": c[3], "close": c[4]
-                    })
-                return JsonResponse({"symbol": query, "data": chart_data})
-            return JsonResponse({"error": "No data from Broker for this token."}, status=404)
 
-        # PATH B: STANDARD ASSETS
+                "exchange":
+                    "NSE",
+
+                "symboltoken":
+                    symbol_token,
+
+                "interval":
+                    "ONE_DAY",
+
+                "fromdate":
+                    "2026-02-11 09:15",
+
+                "todate":
+                    "2026-03-11 15:30",
+            }
+
+            response_data = (
+                smart_api
+                .getCandleData(
+                    params
+                )
+            )
+
+            if (
+                response_data.get(
+                    "status"
+                )
+                and response_data.get(
+                    "data"
+                )
+            ):
+
+                for candle in (
+                    response_data[
+                        "data"
+                    ]
+                ):
+
+                    chart_data.append(
+                        {
+                            "time":
+                                candle[
+                                    0
+                                ].split(
+                                    "T"
+                                )[0],
+
+                            "open":
+                                candle[1],
+
+                            "high":
+                                candle[2],
+
+                            "low":
+                                candle[3],
+
+                            "close":
+                                candle[4],
+                        }
+                    )
+
+                return JsonResponse(
+                    {
+                        "symbol":
+                            query,
+
+                        "data":
+                            chart_data,
+                    }
+                )
+
+            return JsonResponse(
+                {
+                    "error":
+                        "No data from Broker for this token."
+                },
+                status=404
+            )
+
+        # -------------------------------------------------
+        # STANDARD ASSETS
+        # -------------------------------------------------
+
         else:
-            search_candidates = []
-            
-            if segment == 'STOCKS':
-                search_candidates = [f"{query}.NS", query, f"{query}.BO"]
-            elif segment == 'FOREX':
-                search_candidates = [f"{query}=X", f"{query}INR=X", f"{query}USD=X"]
-            elif segment == 'CRYPTO':
-                search_candidates = [f"{query}-USD", f"{query}-INR", query]
-            elif segment == 'COMMODITY':
-                commodity_map = {"GOLD": "GC=F", "SILVER": "SI=F", "CRUDE": "CL=F", "NATGAS": "NG=F", "COPPER": "HG=F", "ALUMINUM": "ALI=F"}
-                target = commodity_map.get(query, f"{query}=F")
-                search_candidates = [target]
-            else:
-                search_candidates = [query]
+
+            search_candidates = (
+                get_yahoo_candidates(
+                    query,
+                    segment
+                )
+            )
 
             df = None
             final_symbol = ""
 
-            for symbol in search_candidates:
-                ticker = yf.Ticker(symbol)
-                df = ticker.history(period="1mo", interval="1d")
-                if not df.empty:
-                    final_symbol = symbol
-                    break
-            
-            if df is None or df.empty:
-                return JsonResponse({"error": f"Asset '{query}' not found."}, status=404)
+            for yahoo_symbol in (
+                search_candidates
+            ):
 
-            for index, row in df.iterrows():
-                chart_data.append({
-                    "time": index.strftime('%Y-%m-%d'),
-                    "open": round(row['Open'], 2),
-                    "high": round(row['High'], 2),
-                    "low": round(row['Low'], 2),
-                    "close": round(row['Close'], 2)
-                })
-            
-            return JsonResponse({"symbol": final_symbol, "data": chart_data})
+                try:
 
-    except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+                    print(
+                        f"[MARKET DATA] "
+                        f"Trying {query} -> "
+                        f"{yahoo_symbol}"
+                    )
+
+                    ticker = yf.Ticker(
+                        yahoo_symbol
+                    )
+
+                    candidate_df = (
+                        ticker.history(
+                            period="1mo",
+                            interval="1d"
+                        )
+                    )
+
+                    if (
+                        candidate_df is not None
+                        and not candidate_df.empty
+                    ):
+
+                        df = candidate_df
+
+                        final_symbol = (
+                            yahoo_symbol
+                        )
+
+                        print(
+                            f"[MARKET DATA] "
+                            f"SUCCESS {query} -> "
+                            f"{final_symbol}"
+                        )
+
+                        break
+
+                except Exception as error:
+
+                    print(
+                        f"[MARKET DATA] "
+                        f"{yahoo_symbol} failed: "
+                        f"{error}"
+                    )
+
+            # -------------------------------------------------
+            # NO DATA
+            # -------------------------------------------------
+
+            if (
+                df is None
+                or df.empty
+            ):
+
+                return JsonResponse(
+                    {
+                        "error":
+                            (
+                                f"Asset '{query}' "
+                                "not found."
+                            )
+                    },
+                    status=404
+                )
+
+            # -------------------------------------------------
+            # FORMAT CHART DATA
+            # -------------------------------------------------
+
+            for index, row in (
+                df.iterrows()
+            ):
+
+                try:
+
+                    chart_data.append(
+                        {
+                            "time":
+                                index.strftime(
+                                    "%Y-%m-%d"
+                                ),
+
+                            "open":
+                                round(
+                                    float(
+                                        row["Open"]
+                                    ),
+                                    4
+                                ),
+
+                            "high":
+                                round(
+                                    float(
+                                        row["High"]
+                                    ),
+                                    4
+                                ),
+
+                            "low":
+                                round(
+                                    float(
+                                        row["Low"]
+                                    ),
+                                    4
+                                ),
+
+                            "close":
+                                round(
+                                    float(
+                                        row["Close"]
+                                    ),
+                                    4
+                                ),
+                        }
+                    )
+
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError
+                ):
+
+                    continue
+
+            if not chart_data:
+
+                return JsonResponse(
+                    {
+                        "error":
+                            (
+                                f"No valid chart "
+                                f"data for '{query}'."
+                            )
+                    },
+                    status=404
+                )
+
+            return JsonResponse(
+                {
+                    "symbol":
+                        final_symbol,
+
+                    "data":
+                        chart_data,
+                }
+            )
+
+    except Exception as error:
+
+        print(
+            f"[MARKET DATA ERROR] "
+            f"{query}/{segment}: {error}"
+        )
+
+        return JsonResponse(
+            {
+                "error":
+                    str(error)
+            },
+            status=500
+        )

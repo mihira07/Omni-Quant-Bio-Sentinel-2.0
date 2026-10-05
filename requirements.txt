@@ -1,0 +1,42 @@
+# Omni-Quant-Bio-Sentinel-2.0
+# Tested against the currently working local setup.
+
+Django==6.1.1
+djangorestframework
+pyotp
+requests
+yfinance
+
+# Angel One SmartAPI
+smartapi-python
+logzero
+websocket-client
+
+# Local AI / RAG
+ollama
+langchain-community
+sentence-transformers
+chromadb
+
+# Computer vision / biometrics
+opencv-python
+dlib
+scipy
+numpy
+
+
+#updated on 19/09/2026
+# ------------------------------------------------------------
+# NON-PIP REQUIREMENTS
+# ------------------------------------------------------------
+# 1. Install Ollama separately:
+#    https://ollama.com/download
+#
+# 2. Pull the model used by the project:
+#    ollama pull llama3.2
+#
+# 3. Required dlib landmark model in the project root:
+#    shape_predictor_68_face_landmarks.dat
+#
+# 4. Recommended Python version for this project:
+#    Python 3.14.x (current tested local setup)

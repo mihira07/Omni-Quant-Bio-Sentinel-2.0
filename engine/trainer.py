@@ -1,5 +1,6 @@
 import os
 import glob
+from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings.sentence_transformer import SentenceTransformerEmbeddings
@@ -7,10 +8,13 @@ from langchain_community.vectorstores import Chroma
 
 # --- CONFIGURATION ---
 KNOWLEDGE_BASE_DIR = os.path.join(os.path.dirname(__file__), "knowledge")
-DB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_db")
+BASE_DIR = Path(__file__).resolve().parent.parent
+DB_DIR = BASE_DIR / "chroma_db"
 
 def ingest_materials():
     print(f"[SYSTEM] Scanning {KNOWLEDGE_BASE_DIR} for training materials...")
+    # Keep the portable project-local store available before Chroma opens it.
+    DB_DIR.mkdir(parents=True, exist_ok=True)
     
     documents = []
     
@@ -49,7 +53,7 @@ def ingest_materials():
     vector_db = Chroma.from_documents(
         documents=chunks, 
         embedding=embedding_model, 
-        persist_directory=DB_DIR
+        persist_directory=str(DB_DIR)
     )
     
     # Force save to disk (Required for some ChromaDB versions)

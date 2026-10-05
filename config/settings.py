@@ -15,6 +15,11 @@ from pathlib import Path
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Keep yfinance's Peewee/SQLite caches inside the project. Its default Windows
+# user-cache location may be unavailable to the Django process.
+YFINANCE_CACHE_DIR = BASE_DIR / 'yfinance_cache'
+YFINANCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/

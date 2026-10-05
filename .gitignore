@@ -1,71 +1,33 @@
-# ==========================================
-# OmniQuant: Bio-Sentinel .gitignore
-# ==========================================
-
-# Django / Database
-db.sqlite3
-db.sqlite3-journal
-media/
-local_settings.py
-
-# Security / Environment Variables
-.env
-.env.local
-.env.*
-
-# Biometric / Machine Learning Models
-# (Do not commit the 100MB+ dlib file to Git)
-shape_predictor_68_face_landmarks.dat
-*.dat
-*.dat.bz2
-*.pt
-*.pth
-*.h5
-
-# Python Virtual Environments
-venv/
-env/
-ENV/
+# Python
 .venv/
-.tox/
-
-# Python Cache & Compiled Files
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+*.pyc
+*.pyo
 
-# IDE / Editor Files
+# Django
+db.sqlite3
+*.sqlite3
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local AI / databases
+chroma_db/
+yfinance_cache/
+*.log
+
+# IDE
 .vscode/
-.idea/
-*.swp
-*.swo
-.spyderproject
-.ropeproject
 
-# OS Generated Files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
+# OS
 Thumbs.db
-chroma_db/chroma.sqlite3
-engine/knowledge/combined_options_data.csv
+.DS_Store
+
+# Local backup copies
+core/templates/core/dashboard_before_*.html
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
