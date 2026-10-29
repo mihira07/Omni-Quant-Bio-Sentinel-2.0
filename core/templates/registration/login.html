@@ -1,0 +1,162 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Omni Quant | Secure Login</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 20px;
+            color: #00f3ff;
+            background: #02040a;
+            font-family: 'Rajdhani', sans-serif;
+            background-image:
+                linear-gradient(#00f3ff12 1px, transparent 1px),
+                linear-gradient(90deg, #00f3ff12 1px, transparent 1px);
+            background-size: 40px 40px;
+        }
+
+        .login-card {
+            width: min(100%, 430px);
+            padding: 30px;
+            background: rgba(3, 8, 18, 0.97);
+            border: 1px solid #00f3ff;
+            border-top: 3px solid #00f3ff;
+            border-radius: 10px;
+            box-shadow: 0 0 35px #00f3ff22;
+        }
+
+        .brand {
+            margin-bottom: 24px;
+            font: 12px 'Share Tech Mono', monospace;
+            letter-spacing: 2px;
+        }
+
+        h1 {
+            margin: 0;
+            color: #fff;
+            font-size: 27px;
+            letter-spacing: 2px;
+        }
+
+        .subtitle {
+            margin: 12px 0 24px;
+            color: #94a3b8;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        label {
+            display: block;
+            margin: 17px 0 7px;
+            font: 12px 'Share Tech Mono', monospace;
+        }
+
+        input {
+            width: 100%;
+            padding: 13px;
+            color: #fff;
+            background: #02040a;
+            border: 1px solid #16444a;
+            border-radius: 5px;
+            font: 13px 'Share Tech Mono', monospace;
+            outline: none;
+        }
+
+        input:focus {
+            border-color: #00f3ff;
+            box-shadow: 0 0 12px #00f3ff22;
+        }
+
+        button {
+            width: 100%;
+            margin-top: 24px;
+            padding: 14px;
+            color: #00f3ff;
+            background: #00343b;
+            border: 1px solid #00f3ff;
+            border-radius: 5px;
+            font: 700 13px 'Share Tech Mono', monospace;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #00505a;
+        }
+
+        .error {
+            margin: 12px 0;
+            color: #ff7070;
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .footer {
+            margin-top: 18px;
+            color: #64748b;
+            font: 10px 'Share Tech Mono', monospace;
+        }
+    </style>
+</head>
+
+<body>
+    <main class="login-card">
+        <div class="brand">OMNI QUANT // SECURE ACCESS</div>
+
+        <h1>USER LOGIN</h1>
+
+        <div class="subtitle">
+            Authenticate to access the market intelligence terminal.
+        </div>
+
+        {% if form.errors %}
+            <div class="error">
+                Invalid username or password. Please try again.
+            </div>
+        {% endif %}
+
+        <form method="post" action="{% url 'login' %}">
+            {% csrf_token %}
+
+            <input type="hidden" name="next" value="{{ next }}">
+
+            <label for="id_username">USERNAME</label>
+            <input
+                id="id_username"
+                name="username"
+                type="text"
+                autocomplete="username"
+                required
+                autofocus
+            >
+
+            <label for="id_password">PASSWORD</label>
+            <input
+                id="id_password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                required
+            >
+
+            <button type="submit">AUTHENTICATE ↗</button>
+        </form>
+
+        <div class="footer">
+            OMNI QUANT // AUTHORIZED ACCESS ONLY
+        </div>
+    </main>
+</body>
+</html>

@@ -30,4 +30,21 @@ core/templates/core/dashboard_before_*.html
 
 # Python cache
 .pytest_cache/
-.mypy_cache/
+.mypy_cache/.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+db.sqlite3
+*.sqlite3
+media/
+staticfiles/
+chroma_db/
+node_modules/
+.pytest_cache/
+*.pem
+*.key
+*.p12
+*.pfx

@@ -1,146 +1,219 @@
-from __future__ import annotations
+"""Bio-Sentinel face detection and head-turn liveness verification."""
 
-import time
+from collections import deque
 from pathlib import Path
+from statistics import median
+from threading import Lock
+from time import monotonic
 
 import cv2
 import dlib
 import numpy as np
-from django.conf import settings
 
 
-class BiometricEngine:
+class BioSentinelEngine:
+    MIN_FACE_RATIO = 0.025
+    TURN_THRESHOLD_DEGREES = 9.0
+    REQUIRED_STABLE_FRAMES = 2
+    BASELINE_FRAMES = 5
+    NO_FACE_RESET_SECONDS = 5.0
+    CHALLENGE_TIMEOUT_SECONDS = 25.0
 
     def __init__(self):
-
-        self.detector = dlib.get_frontal_face_detector()
-
-        predictor_path = (
-            Path(settings.BASE_DIR)
+        self.model_path = (
+            Path(__file__).resolve().parent.parent
             / "shape_predictor_68_face_landmarks.dat"
         )
 
-        if not predictor_path.exists():
-            raise FileNotFoundError(
-                f"Missing face landmark model: {predictor_path}"
+        self.detector = None
+        self.predictor = None
+        self._model_error = None
+
+        self._lock = Lock()
+        self._reset_challenge()
+        self._last_face_time = 0.0
+
+    def _ensure_loaded(self):
+        if self.detector is not None and self.predictor is not None:
+            return
+
+        if self._model_error is not None:
+            raise RuntimeError(self._model_error)
+
+        if not self.model_path.exists():
+            self._model_error = (
+                "Dlib landmark model not found: "
+                f"{self.model_path}"
             )
+            raise FileNotFoundError(self._model_error)
 
-        self.predictor = dlib.shape_predictor(
-            str(predictor_path)
-        )
+        try:
+            self.detector = dlib.get_frontal_face_detector()
+            self.predictor = dlib.shape_predictor(
+                str(self.model_path)
+            )
+        except Exception as exc:
+            self._model_error = (
+                f"Unable to load the Bio-Sentinel face model: {exc}"
+            )
+            raise RuntimeError(self._model_error) from exc
 
-        # Liveness state
-        self.phase = "WAIT_FACE"
-
+    def _reset_challenge(self):
+        self.stage = "CALIBRATING"
+        self.baseline_samples = []
         self.baseline_yaw = None
+        self.stage_started_at = monotonic()
+        self.first_turn_sign = None
+        self._stable_move_frames = 0
+        self._yaw_history = deque(maxlen=3)
 
-        self.no_face_count = 0
+    def reset_challenge(self):
+        """Public method to restart the liveness verification."""
+        with self._lock:
+            self._reset_challenge()
+            self._last_face_time = 0.0
 
-        self.last_seen = 0.0
-
-        self.liveness_verified = False
-
-        # Number of consecutive missing frames before reset
-        self.no_face_reset_frames = 3
-
-        # Required head movement in degrees
-        self.yaw_threshold = 12.0
-
-    # -----------------------------------------------------
-    # HEAD POSE
-    # -----------------------------------------------------
-
-    def estimate_yaw(
-        self,
-        gray_frame,
-        face,
+    @staticmethod
+    def _result(
+        face_present=False,
+        human_verified=False,
+        status="NO_FACE",
+        challenge="NO_FACE",
+        yaw=None,
+        baseline_yaw=None,
+        bbox=None,
+        face_ratio=0.0,
+        ear=0.0,
     ):
+        return {
+            "face_present": bool(face_present),
+            "human_verified": bool(human_verified),
+            "status": status,
+            "challenge": challenge,
+            "yaw": (
+                round(float(yaw), 2)
+                if yaw is not None
+                else None
+            ),
+            "baseline_yaw": (
+                round(float(baseline_yaw), 2)
+                if baseline_yaw is not None
+                else None
+            ),
+            "bbox": bbox,
+            "face_ratio": round(float(face_ratio), 4),
+            "ear": round(float(ear), 4),
+        }
 
-        landmarks = self.predictor(
-            gray_frame,
-            face,
+    @staticmethod
+    def _eye_aspect_ratio(eye_points):
+        points = np.asarray(
+            eye_points,
+            dtype=np.float64,
         )
 
-        points_2d = np.array(
+        horizontal = np.linalg.norm(
+            points[0] - points[3]
+        )
+
+        if horizontal <= 1e-6:
+            return 0.0
+
+        vertical_a = np.linalg.norm(
+            points[1] - points[5]
+        )
+        vertical_b = np.linalg.norm(
+            points[2] - points[4]
+        )
+
+        return float(
+            (vertical_a + vertical_b)
+            / (2.0 * horizontal)
+        )
+
+    @staticmethod
+    def calculate_ear(eye_points):
+        return BioSentinelEngine._eye_aspect_ratio(
+            eye_points
+        )
+
+    def _detect_face(self, gray):
+        """Try multiple grayscale enhancements for webcam detection."""
+        self._ensure_loaded()
+
+        clahe = cv2.createCLAHE(
+            clipLimit=2.2,
+            tileGridSize=(8, 8),
+        ).apply(gray)
+
+        equalized = cv2.equalizeHist(gray)
+
+        for image in (gray, clahe, equalized):
+            rects = self.detector(image, 1)
+
+            if rects:
+                return rects, image
+
+        rects = self.detector(clahe, 2)
+
+        if rects:
+            return rects, clahe
+
+        return [], clahe
+
+    @staticmethod
+    def _estimate_yaw(coords, width, height):
+        """Estimate approximate horizontal head rotation from landmarks."""
+        image_points = np.array(
             [
-                (
-                    landmarks.part(30).x,
-                    landmarks.part(30).y,
-                ),  # nose
-                (
-                    landmarks.part(8).x,
-                    landmarks.part(8).y,
-                ),  # chin
-                (
-                    landmarks.part(36).x,
-                    landmarks.part(36).y,
-                ),  # left eye
-                (
-                    landmarks.part(45).x,
-                    landmarks.part(45).y,
-                ),  # right eye
-                (
-                    landmarks.part(48).x,
-                    landmarks.part(48).y,
-                ),  # left mouth
-                (
-                    landmarks.part(54).x,
-                    landmarks.part(54).y,
-                ),  # right mouth
+                coords[30],
+                coords[8],
+                coords[36],
+                coords[45],
+                coords[48],
+                coords[54],
             ],
             dtype=np.float64,
         )
 
-        # Generic 3D facial model.
-        points_3d = np.array(
+        model_points = np.array(
             [
-                (0.0, 0.0, 0.0),          # nose
-                (0.0, -330.0, -65.0),     # chin
-                (-225.0, 170.0, -135.0),  # left eye
-                (225.0, 170.0, -135.0),   # right eye
-                (-150.0, -150.0, -125.0), # left mouth
-                (150.0, -150.0, -125.0),  # right mouth
+                (0.0, 0.0, 0.0),
+                (0.0, -330.0, -65.0),
+                (-225.0, 170.0, -135.0),
+                (225.0, 170.0, -135.0),
+                (-150.0, -150.0, -125.0),
+                (150.0, -150.0, -125.0),
             ],
             dtype=np.float64,
         )
 
-        height, width = gray_frame.shape[:2]
-
-        focal_length = width
+        focal_length = float(width)
+        center = (
+            width / 2.0,
+            height / 2.0,
+        )
 
         camera_matrix = np.array(
             [
-                [
-                    focal_length,
-                    0,
-                    width / 2,
-                ],
-                [
-                    0,
-                    focal_length,
-                    height / 2,
-                ],
-                [
-                    0,
-                    0,
-                    1,
-                ],
+                [focal_length, 0.0, center[0]],
+                [0.0, focal_length, center[1]],
+                [0.0, 0.0, 1.0],
             ],
             dtype=np.float64,
         )
 
-        dist_coeffs = np.zeros(
-            (4, 1)
+        distortion = np.zeros(
+            (4, 1),
+            dtype=np.float64,
         )
 
-        success, rotation_vector, translation_vector = (
-            cv2.solvePnP(
-                points_3d,
-                points_2d,
-                camera_matrix,
-                dist_coeffs,
-                flags=cv2.SOLVEPNP_ITERATIVE,
-            )
+        success, rotation_vector, _ = cv2.solvePnP(
+            model_points,
+            image_points,
+            camera_matrix,
+            distortion,
+            flags=cv2.SOLVEPNP_ITERATIVE,
         )
 
         if not success:
@@ -150,423 +223,347 @@ class BiometricEngine:
             rotation_vector
         )
 
-        sy = np.sqrt(
-            rotation_matrix[0, 0] ** 2
-            + rotation_matrix[1, 0] ** 2
-        )
+        angles = cv2.RQDecomp3x3(
+            rotation_matrix
+        )[0]
 
-        singular = sy < 1e-6
+        yaw = float(angles[1])
 
-        if not singular:
+        if not np.isfinite(yaw):
+            return None
 
-            x_angle = np.arctan2(
-                rotation_matrix[2, 1],
-                rotation_matrix[2, 2],
+        return yaw
+
+    def get_face_telemetry(self, frame):
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return self._result()
+
+        with self._lock:
+            now = monotonic()
+
+            if len(frame.shape) == 3:
+                gray = cv2.cvtColor(
+                    frame,
+                    cv2.COLOR_BGR2GRAY,
+                )
+            else:
+                gray = frame.copy()
+
+            rects, detector_image = self._detect_face(
+                gray
             )
 
-            y_angle = np.arctan2(
-                -rotation_matrix[2, 0],
-                sy,
+            if not rects:
+                if (
+                    self._last_face_time
+                    and now - self._last_face_time
+                    > self.NO_FACE_RESET_SECONDS
+                ):
+                    self._reset_challenge()
+
+                return self._result(
+                    face_present=False,
+                    human_verified=False,
+                    status="NO_FACE",
+                    challenge="NO_FACE",
+                    baseline_yaw=self.baseline_yaw,
+                )
+
+            rect = max(
+                rects,
+                key=lambda item: (
+                    item.width() * item.height()
+                ),
             )
 
-            z_angle = np.arctan2(
-                rotation_matrix[1, 0],
-                rotation_matrix[0, 0],
+            left = max(
+                0,
+                int(rect.left()),
+            )
+            top = max(
+                0,
+                int(rect.top()),
+            )
+            right = min(
+                gray.shape[1] - 1,
+                int(rect.right()),
+            )
+            bottom = min(
+                gray.shape[0] - 1,
+                int(rect.bottom()),
             )
 
-        else:
-
-            x_angle = np.arctan2(
-                -rotation_matrix[1, 2],
-                rotation_matrix[1, 1],
+            face_width = max(
+                0,
+                right - left,
+            )
+            face_height = max(
+                0,
+                bottom - top,
             )
 
-            y_angle = np.arctan2(
-                -rotation_matrix[2, 0],
-                sy,
+            face_ratio = (
+                face_width * face_height
+            ) / max(
+                1,
+                gray.shape[0] * gray.shape[1],
             )
 
-            z_angle = 0
+            bbox = [
+                left,
+                top,
+                face_width,
+                face_height,
+            ]
 
-        yaw = np.degrees(
-            y_angle
-        )
-
-        return float(yaw)
-
-    # -----------------------------------------------------
-    # FACE TELEMETRY + LIVENESS
-    # -----------------------------------------------------
-
-    def get_face_telemetry(
-        self,
-        frame,
-    ):
-
-        if frame is None or frame.size == 0:
-
-            return {
-                "face_present": False,
-                "human_verified": False,
-                "status": "NO_FRAME",
-                "challenge": "NO_FRAME",
-                "yaw": None,
-                "bbox": None,
-                "face_ratio": 0.0,
-            }
-
-        gray = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2GRAY,
-        )
-
-        # Improve low-light frames.
-        clahe = cv2.createCLAHE(
-            clipLimit=2.0,
-            tileGridSize=(8, 8),
-        )
-
-        gray = clahe.apply(gray)
-
-        faces = self.detector(
-            gray,
-            2,
-        )
-
-        if not faces:
-
-            self.no_face_count += 1
+            self._last_face_time = now
 
             if (
-                self.no_face_count
-                >= self.no_face_reset_frames
+                face_ratio < self.MIN_FACE_RATIO
+                or face_width < 45
+                or face_height < 45
             ):
+                return self._result(
+                    face_present=False,
+                    human_verified=False,
+                    status="FACE_TOO_SMALL",
+                    challenge="MOVE_CLOSER",
+                    baseline_yaw=self.baseline_yaw,
+                    bbox=bbox,
+                    face_ratio=face_ratio,
+                )
 
-                self.phase = "WAIT_FACE"
-                self.baseline_yaw = None
-                self.liveness_verified = False
+            shape = self.predictor(
+                detector_image,
+                rect,
+            )
 
-            return {
-                "face_present": False,
-                "human_verified": False,
-                "status": "NO_FACE",
-                "challenge": "NO_FACE",
-                "yaw": None,
-                "bbox": None,
-                "face_ratio": 0.0,
-            }
-
-        self.no_face_count = 0
-        self.last_seen = time.time()
-
-        # Use the largest detected face.
-        face = max(
-            faces,
-            key=lambda f:
-                f.width() * f.height(),
-        )
-
-        x = max(
-            0,
-            face.left(),
-        )
-
-        y = max(
-            0,
-            face.top(),
-        )
-
-        w = min(
-            face.width(),
-            frame.shape[1] - x,
-        )
-
-        h = min(
-            face.height(),
-            frame.shape[0] - y,
-        )
-
-        frame_area = (
-            frame.shape[0]
-            * frame.shape[1]
-        )
-
-        face_area = w * h
-
-        face_ratio = (
-            face_area / frame_area
-            if frame_area
-            else 0.0
-        )
-
-        # Ignore extremely tiny detections.
-        if face_ratio < 0.015:
-
-            return {
-                "face_present": False,
-                "human_verified": False,
-                "status": "FACE_TOO_SMALL",
-                "challenge": "MOVE_CLOSER",
-                "yaw": None,
-                "bbox": [
-                    x,
-                    y,
-                    w,
-                    h,
+            coords = np.array(
+                [
+                    [point.x, point.y]
+                    for point in shape.parts()
                 ],
-                "face_ratio": round(
-                    face_ratio,
-                    4,
-                ),
-            }
+                dtype=np.float64,
+            )
 
-        # Estimate head yaw.
-        yaw = self.estimate_yaw(
-            gray,
-            face,
-        )
+            left_ear = self._eye_aspect_ratio(
+                coords[42:48]
+            )
+            right_ear = self._eye_aspect_ratio(
+                coords[36:42]
+            )
 
-        if yaw is None:
+            ear = float(
+                (left_ear + right_ear) / 2.0
+            )
 
-            return {
-                "face_present": False,
-                "human_verified": False,
-                "status": "POSE_UNAVAILABLE",
-                "challenge": "HOLD_STEADY",
-                "yaw": None,
-                "bbox": [
-                    x,
-                    y,
-                    w,
-                    h,
-                ],
-                "face_ratio": round(
-                    face_ratio,
-                    4,
-                ),
-            }
+            yaw = self._estimate_yaw(
+                coords,
+                gray.shape[1],
+                gray.shape[0],
+            )
 
-        # -------------------------------------------------
-        # FIRST FACE -> CALIBRATE
-        # -------------------------------------------------
+            if yaw is None:
+                return self._result(
+                    face_present=True,
+                    human_verified=False,
+                    status="POSE_UNCERTAIN",
+                    challenge="CENTER_FACE",
+                    baseline_yaw=self.baseline_yaw,
+                    bbox=bbox,
+                    face_ratio=face_ratio,
+                    ear=ear,
+                )
 
-        if self.phase == "WAIT_FACE":
+            self._yaw_history.append(yaw)
+            smoothed_yaw = float(
+                median(self._yaw_history)
+            )
 
-            self.baseline_yaw = yaw
-
-            self.phase = "MOVE_LEFT"
-
-            return {
-                "face_present": False,
-                "human_verified": False,
-                "status": "MOVE_LEFT",
-                "challenge": "TURN_HEAD_LEFT",
-                "yaw": round(
-                    yaw,
-                    2,
-                ),
-                "baseline_yaw": round(
-                    self.baseline_yaw,
-                    2,
-                ),
-                "bbox": [
-                    x,
-                    y,
-                    w,
-                    h,
-                ],
-                "face_ratio": round(
-                    face_ratio,
-                    4,
-                ),
-            }
-
-        # -------------------------------------------------
-        # LEFT CHALLENGE
-        # -------------------------------------------------
-
-        if self.phase == "MOVE_LEFT":
+            if self.stage == "VERIFIED":
+                return self._result(
+                    face_present=True,
+                    human_verified=True,
+                    status="LIVE_PRESENT",
+                    challenge="VERIFIED",
+                    yaw=smoothed_yaw,
+                    baseline_yaw=self.baseline_yaw,
+                    bbox=bbox,
+                    face_ratio=face_ratio,
+                    ear=ear,
+                )
 
             if (
-                yaw
-                <= self.baseline_yaw
-                - self.yaw_threshold
+                self.stage in {"MOVE_LEFT", "MOVE_RIGHT"}
+                and now - self.stage_started_at
+                > self.CHALLENGE_TIMEOUT_SECONDS
             ):
+                self._reset_challenge()
 
-                self.phase = "MOVE_RIGHT"
+            if self.stage == "CALIBRATING":
+                self.baseline_samples.append(
+                    smoothed_yaw
+                )
 
-                return {
-                    "face_present": False,
-                    "human_verified": False,
-                    "status": "MOVE_RIGHT",
-                    "challenge": "TURN_HEAD_RIGHT",
-                    "yaw": round(
-                        yaw,
-                        2,
-                    ),
-                    "baseline_yaw": round(
-                        self.baseline_yaw,
-                        2,
-                    ),
-                    "bbox": [
-                        x,
-                        y,
-                        w,
-                        h,
-                    ],
-                    "face_ratio": round(
-                        face_ratio,
-                        4,
-                    ),
-                }
+                if (
+                    len(self.baseline_samples)
+                    < self.BASELINE_FRAMES
+                ):
+                    return self._result(
+                        face_present=True,
+                        status="CALIBRATING",
+                        challenge="CENTER_FACE",
+                        yaw=smoothed_yaw,
+                        bbox=bbox,
+                        face_ratio=face_ratio,
+                        ear=ear,
+                    )
 
-            return {
-                "face_present": False,
-                "human_verified": False,
-                "status": "MOVE_LEFT",
-                "challenge": "TURN_HEAD_LEFT",
-                "yaw": round(
-                    yaw,
-                    2,
-                ),
-                "baseline_yaw": round(
-                    self.baseline_yaw,
-                    2,
-                ),
-                "bbox": [
-                    x,
-                    y,
-                    w,
-                    h,
-                ],
-                "face_ratio": round(
-                    face_ratio,
-                    4,
-                ),
-            }
+                self.baseline_yaw = float(
+                    median(
+                        self.baseline_samples[
+                            -self.BASELINE_FRAMES:
+                        ]
+                    )
+                )
 
-        # -------------------------------------------------
-        # RIGHT CHALLENGE
-        # -------------------------------------------------
+                self.stage = "MOVE_LEFT"
+                self.stage_started_at = now
+                self.first_turn_sign = None
+                self._stable_move_frames = 0
 
-        if self.phase == "MOVE_RIGHT":
+                return self._result(
+                    face_present=True,
+                    status="MOVE_LEFT",
+                    challenge="TURN_HEAD_LEFT",
+                    yaw=smoothed_yaw,
+                    baseline_yaw=self.baseline_yaw,
+                    bbox=bbox,
+                    face_ratio=face_ratio,
+                    ear=ear,
+                )
 
-            if (
-                yaw
-                >= self.baseline_yaw
-                + self.yaw_threshold
-            ):
+            delta = (
+                smoothed_yaw
+                - float(self.baseline_yaw)
+            )
 
-                self.phase = "VERIFIED"
+            if self.stage == "MOVE_LEFT":
+                # Accept either initial yaw direction to accommodate
+                # differences in webcam orientation and mirroring.
+                if abs(delta) >= self.TURN_THRESHOLD_DEGREES:
+                    self._stable_move_frames += 1
+                else:
+                    self._stable_move_frames = 0
 
-                self.liveness_verified = True
+                if (
+                    self._stable_move_frames
+                    >= self.REQUIRED_STABLE_FRAMES
+                ):
+                    self.first_turn_sign = (
+                        1 if delta > 0 else -1
+                    )
 
-                return {
-                    "face_present": True,
-                    "human_verified": True,
-                    "status": "LIVE_PRESENT",
-                    "challenge": "VERIFIED",
-                    "yaw": round(
-                        yaw,
-                        2,
-                    ),
-                    "baseline_yaw": round(
-                        self.baseline_yaw,
-                        2,
-                    ),
-                    "bbox": [
-                        x,
-                        y,
-                        w,
-                        h,
-                    ],
-                    "face_ratio": round(
-                        face_ratio,
-                        4,
-                    ),
-                }
+                    self.stage = "MOVE_RIGHT"
+                    self.stage_started_at = now
+                    self._stable_move_frames = 0
 
-            return {
-                "face_present": False,
-                "human_verified": False,
-                "status": "MOVE_RIGHT",
-                "challenge": "TURN_HEAD_RIGHT",
-                "yaw": round(
-                    yaw,
-                    2,
-                ),
-                "baseline_yaw": round(
-                    self.baseline_yaw,
-                    2,
-                ),
-                "bbox": [
-                    x,
-                    y,
-                    w,
-                    h,
-                ],
-                "face_ratio": round(
-                    face_ratio,
-                    4,
-                ),
-            }
+                    return self._result(
+                        face_present=True,
+                        status="MOVE_RIGHT",
+                        challenge="TURN_HEAD_RIGHT",
+                        yaw=smoothed_yaw,
+                        baseline_yaw=self.baseline_yaw,
+                        bbox=bbox,
+                        face_ratio=face_ratio,
+                        ear=ear,
+                    )
 
-        # -------------------------------------------------
-        # VERIFIED
-        # -------------------------------------------------
+                return self._result(
+                    face_present=True,
+                    status="MOVE_LEFT",
+                    challenge="TURN_HEAD_LEFT",
+                    yaw=smoothed_yaw,
+                    baseline_yaw=self.baseline_yaw,
+                    bbox=bbox,
+                    face_ratio=face_ratio,
+                    ear=ear,
+                )
 
-        if self.phase == "VERIFIED":
+            if self.stage == "MOVE_RIGHT":
+                # The second movement must reverse the first movement.
+                reversed_direction = (
+                    self.first_turn_sign is not None
+                    and delta * self.first_turn_sign
+                    <= -self.TURN_THRESHOLD_DEGREES
+                )
 
-            return {
-                "face_present": True,
-                "human_verified": True,
-                "status": "LIVE_PRESENT",
-                "challenge": "VERIFIED",
-                "yaw": round(
-                    yaw,
-                    2,
-                ),
-                "baseline_yaw": round(
-                    self.baseline_yaw,
-                    2,
-                ),
-                "bbox": [
-                    x,
-                    y,
-                    w,
-                    h,
-                ],
-                "face_ratio": round(
-                    face_ratio,
-                    4,
-                ),
-            }
+                if reversed_direction:
+                    self._stable_move_frames += 1
+                else:
+                    self._stable_move_frames = 0
 
-        # Safety fallback.
-        self.phase = "WAIT_FACE"
-        self.baseline_yaw = None
-        self.liveness_verified = False
+                if (
+                    self._stable_move_frames
+                    >= self.REQUIRED_STABLE_FRAMES
+                ):
+                    self.stage = "VERIFIED"
 
-        return {
-            "face_present": False,
-            "human_verified": False,
-            "status": "RESET",
-            "challenge": "RETRY",
-            "yaw": round(
-                yaw,
-                2,
-            ),
-            "bbox": [
-                x,
-                y,
-                w,
-                h,
-            ],
-            "face_ratio": round(
-                face_ratio,
-                4,
-            ),
-        }
+                    return self._result(
+                        face_present=True,
+                        human_verified=True,
+                        status="LIVE_PRESENT",
+                        challenge="VERIFIED",
+                        yaw=smoothed_yaw,
+                        baseline_yaw=self.baseline_yaw,
+                        bbox=bbox,
+                        face_ratio=face_ratio,
+                        ear=ear,
+                    )
+
+                return self._result(
+                    face_present=True,
+                    status="MOVE_RIGHT",
+                    challenge="TURN_HEAD_RIGHT",
+                    yaw=smoothed_yaw,
+                    baseline_yaw=self.baseline_yaw,
+                    bbox=bbox,
+                    face_ratio=face_ratio,
+                    ear=ear,
+                )
+
+            self._reset_challenge()
+
+            return self._result(
+                face_present=True,
+                status="CALIBRATING",
+                challenge="CENTER_FACE",
+                yaw=smoothed_yaw,
+                bbox=bbox,
+                face_ratio=face_ratio,
+                ear=ear,
+            )
+
+    def detect_faces(self, frame):
+        """Compatibility method for callers using detect_faces()."""
+        return self.get_face_telemetry(frame)
+
+    def analyze(self, frame):
+        """Compatibility method for callers using analyze()."""
+        return self.get_face_telemetry(frame)
+
+    def get_stress_status(self, frame):
+        telemetry = self.get_face_telemetry(frame)
+
+        if not telemetry["face_present"]:
+            return "NO_FACE"
+
+        if telemetry["ear"] < 0.20:
+            return "LOCKDOWN"
+
+        return "STABLE"
 
 
-engine = BiometricEngine()
+# IMPORTANT: sentinel.views imports this object directly.
+# Loading the landmark model is deferred until the first camera frame.
+engine = BioSentinelEngine()
